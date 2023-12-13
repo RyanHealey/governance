@@ -318,7 +318,7 @@ export class StakeConnection {
       throw new Error("Amount greater than locked amount.");
     }
 
-    await this.unlockTokensUnchecked(stakeAccount, amount);
+    return this.unlockTokensUnchecked(stakeAccount, amount);
   }
 
   // Unchecked unlock
@@ -397,11 +397,7 @@ export class StakeConnection {
       this.program.provider
     );
 
-    await this.program.provider.sendAll(
-      transactions.map((tx) => {
-        return { tx, signers: [] };
-      })
-    );
+    return transactions
   }
   public async withUpdateVoterWeight(
     instructions: TransactionInstruction[],
@@ -594,7 +590,7 @@ export class StakeConnection {
         .instruction()
     );
 
-    await this.provider.sendAndConfirm(transaction);
+    return transaction
   }
 
   public async setupVestingAccount(
@@ -629,7 +625,7 @@ export class StakeConnection {
       );
     }
 
-    await this.provider.sendAndConfirm(transaction, [stakeAccountKeypair]);
+    return { transaction: transaction, signers: [stakeAccountKeypair]};
   }
 
   public async depositTokens(
@@ -672,7 +668,7 @@ export class StakeConnection {
 
     const tx = new Transaction();
     tx.add(...ixs);
-    await this.provider.sendAndConfirm(tx, signers);
+    return {transaction: tx, signers: signers}
   }
 
   public async getTokenOwnerRecordAddress(user: PublicKey) {
@@ -698,7 +694,7 @@ export class StakeConnection {
     );
 
     const amount = new PythBalance(amountBN);
-    await this.unlockTokensUnchecked(stakeAccount, amount);
+    return this.unlockTokensUnchecked(stakeAccount, amount);
   }
 
   // Unlock all vested and unvested tokens
@@ -725,7 +721,7 @@ export class StakeConnection {
       .add(balanceSummary.unvested.locking.toBN());
 
     const amount = new PythBalance(amountBN);
-    await this.unlockTokensUnchecked(stakeAccount, amount);
+    return this.unlockTokensUnchecked(stakeAccount, amount);
   }
 
   public async depositAndLockTokens(
@@ -779,7 +775,7 @@ export class StakeConnection {
       // Each of these instructions is 27 bytes (<< 1232) so we don't cap how many of them we fit in the transaction
       ixs.push(...(await this.buildCleanupUnlockedPositions(stakeAccount))); // Try to make room by closing unlocked positions
     }
-    await this.program.methods
+    return {transaction: await this.program.methods
       .createPosition(this.votingProduct, amount.toBN())
       .preInstructions(ixs)
       .accounts({
@@ -787,7 +783,7 @@ export class StakeConnection {
         targetAccount: this.votingProductMetadataAccount,
       })
       .signers(signers)
-      .rpc({ skipPreflight: true });
+      .transaction(), signers: signers};
   }
 
   public async buildCleanupUnlockedPositions(
@@ -865,14 +861,14 @@ export class StakeConnection {
       );
     }
 
-    await this.program.methods
+    return this.program.methods
       .withdrawStake(amount.toBN())
       .preInstructions(preIxs)
       .accounts({
         stakeAccountPositions: stakeAccount.address,
         destination: toAccount,
       })
-      .rpc();
+      .transaction();
   }
 
   public async requestSplit(
@@ -880,12 +876,12 @@ export class StakeConnection {
     amount: PythBalance,
     recipient: PublicKey
   ) {
-    await this.program.methods
+    return this.program.methods
       .requestSplit(amount.toBN(), recipient)
       .accounts({
         stakeAccountPositions: stakeAccount.address,
       })
-      .rpc();
+      .transaction();
   }
 
   public async getSplitRequest(
@@ -923,7 +919,7 @@ export class StakeConnection {
       )
     );
 
-    await this.program.methods
+    return {transaction: await this.program.methods
       .acceptSplit(amount.toBN(), recipient)
       .accounts({
         sourceStakeAccountPositions: stakeAccount.address,
@@ -932,7 +928,7 @@ export class StakeConnection {
       })
       .signers([newStakeAccountKeypair])
       .preInstructions(instructions)
-      .rpc();
+      .transaction(), signers: [newStakeAccountKeypair]};
   }
 }
 export interface BalanceSummary {

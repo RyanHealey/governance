@@ -169,6 +169,8 @@ export async function startValidatorRaw(portNumber: number, otherArgs: string) {
  * ```controller.abort()```
  */
 export async function startValidator(portNumber: number, config: AnchorConfig) {
+  console.log("Starting validator...")
+
   const programAddress = new PublicKey(config.programs.localnet.staking);
   const idlPath = config.path.idl_path;
   const binaryPath = config.path.binary_path;
@@ -190,7 +192,12 @@ export async function startValidator(portNumber: number, config: AnchorConfig) {
     otherArgs
   );
 
+  console.log("Started!")
+
   const provider = new AnchorProvider(connection, new Wallet(user), {});
+  console.log("Provider created!")
+
+
   const program = new Program(
     JSON.parse(fs.readFileSync(idlPath).toString()),
     programAddress,
@@ -202,6 +209,9 @@ export async function startValidator(portNumber: number, config: AnchorConfig) {
       connection.rpcEndpoint
     }`
   );
+
+  console.log("Validator Set Up!")
+
 
   return { controller, program, provider };
 }
@@ -453,6 +463,8 @@ export async function standardSetup(
     config
   );
 
+  console.log("Started validator")
+
   await createMint(
     provider,
     pythMintAccount,
@@ -461,6 +473,9 @@ export async function standardSetup(
     PYTH_DECIMALS,
     TOKEN_PROGRAM_ID
   );
+
+  console.log("Created mint")
+
 
   const user = provider.wallet.publicKey;
 
@@ -471,6 +486,9 @@ export async function standardSetup(
     amount ? amount : PythBalance.fromString("200"),
     program.provider.connection
   );
+
+  console.log("Airdropped pyth")
+
 
   if (globalConfig.pythGovernanceRealm == null) {
     const { realm, governance } = await createDefaultRealm(
@@ -483,13 +501,20 @@ export async function standardSetup(
     globalConfig.pythGovernanceRealm = realm;
   }
 
+  console.log("Realm created")
+
+
   const temporaryConfig = { ...globalConfig };
   // User becomes a temporary dictator during setup
   temporaryConfig.governanceAuthority = user;
 
   await initConfig(program, pythMintAccount.publicKey, temporaryConfig);
 
+  console.log("Config init")
+
   await initGovernanceProduct(program, user);
+
+  console.log("Governance init")
 
   // Give the power back to the people
   await program.methods
