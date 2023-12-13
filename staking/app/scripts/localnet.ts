@@ -12,10 +12,15 @@ import {
 import {StakeConnection, PythBalance} from "..";
 import {loadKeypair} from "../../tests/utils/keys";
 import {EPOCH_DURATION, StakeAccount} from "../../lib/app";
+import {Idl, Program} from "@coral-xyz/anchor";
+// @ts-ignore
+import { IDL } from "../coral_multisig"
 
 const portNumber = 8899;
-
 async function main() {
+
+
+
     let stakeConnection: StakeConnection;
     let controller: CustomAbortController;
 
@@ -64,15 +69,72 @@ async function main() {
         );
     }
 
+    let multiSig = new Program((IDL as Idl), new PublicKey("86A3SjX2cdavMiAhipoZGbVmKq8Tbari4g3pc9iAqWL"), stakeConnection.provider);
+
+    const ownerA = anchor.web3.Keypair.generate();
+    const ownerB = anchor.web3.Keypair.generate();
+    const ownerC = anchor.web3.Keypair.generate();
+    const ownerD = anchor.web3.Keypair.generate();
+    const ownerE = anchor.web3.Keypair.generate();
+    const owners = [ownerA.publicKey, ownerB.publicKey, ownerC.publicKey, ownerD.publicKey, ownerE.publicKey];
+
+    const threshold = new anchor.BN(3);
+    const multisigSize = 200; // Big enough.
+
+    // Create multisigs
+    //Alice
+
+    const aliceMultisigPair = anchor.web3.Keypair.generate();
+
+    const [aliceMultisigSigner, aliceNonce] =
+        anchor.web3.PublicKey.findProgramAddressSync(
+            [aliceMultisigPair.publicKey.toBuffer()],
+            multiSig.programId
+        );
+    await multiSig.methods.createMultisig(owners, threshold, aliceNonce).accounts(
+        {
+            multisig: aliceMultisigPair.publicKey,
+        })
+        .preInstructions([await multiSig.account.multisig.createInstruction(
+            aliceMultisigPair,
+            multisigSize
+        )])
+        .signers([aliceMultisigPair])
+        .rpc();
+
+    console.log("Alice Multisig: ", aliceMultisigPair.publicKey.toBase58(), ", Alice Signer: ", aliceMultisigSigner.toBase58());
+
     const aliceStakeConnection = await StakeConnection.createStakeConnection(
         stakeConnection.program.provider.connection,
-        new anchor.Wallet(alice),
+        new anchor.Wallet(new Keypair({publicKey: aliceMultisigSigner.toBytes(), secretKey: undefined})),
         stakeConnection.program.programId
     );
 
+
+    //Bob
+    const bobMultisigPair = anchor.web3.Keypair.generate();
+
+    const [bobMultisigSigner, bobNonce] =
+        anchor.web3.PublicKey.findProgramAddressSync(
+            [bobMultisigPair.publicKey.toBuffer()],
+            multiSig.programId
+        );
+    await multiSig.methods.createMultisig(owners, threshold, bobNonce).accounts(
+        {
+            multisig: bobMultisigPair.publicKey,
+        })
+        .preInstructions([await multiSig.account.multisig.createInstruction(
+            bobMultisigPair,
+            multisigSize
+        )])
+        .signers([bobMultisigPair])
+        .rpc();
+
+    console.log("Bob Multisig: ", bobMultisigPair.publicKey.toBase58(), ", Bob Signer: ", bobMultisigSigner.toBase58());
+
     const bobStakeConnection = await StakeConnection.createStakeConnection(
         stakeConnection.program.provider.connection,
-        new anchor.Wallet(bob),
+        new anchor.Wallet(new Keypair({publicKey: bobMultisigSigner.toBytes(), secretKey: undefined})),
         stakeConnection.program.programId
     );
 
@@ -81,7 +143,7 @@ async function main() {
         undefined,
         PythBalance.fromString("500")
     );
-    console.log(depositAndLockTx)
+    // depositAndLockTx.transaction.instructions.forEach(ix => console.log(ix))
 
     // let stakeAccounts = await aliceStakeConnection.getStakeAccounts(alice.publicKey);
     // let stakeAccount = stakeAccounts.pop();
@@ -104,7 +166,7 @@ async function main() {
         vestingSchedule
     );
 
-    console.log(vestingTx)
+    // console.log(vestingTx)
 
     // await aliceStakeConnection.unlockTokens(stakeAccount, PythBalance.fromString("500"));
     await stakeConnection.program.methods
