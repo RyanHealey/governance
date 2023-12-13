@@ -1,6 +1,7 @@
 import * as anchor from "@coral-xyz/anchor";
+// @ts-ignore
 import BN from "bn.js";
-import {Keypair, PublicKey} from "@solana/web3.js";
+import {Keypair, PublicKey, Signer, Transaction, TransactionInstruction, VersionedTransaction} from "@solana/web3.js";
 import {
     readAnchorConfig,
     standardSetup,
@@ -12,22 +13,19 @@ import {
 import {StakeConnection, PythBalance} from "..";
 import {loadKeypair} from "../../tests/utils/keys";
 import {EPOCH_DURATION, StakeAccount} from "../../lib/app";
-import {Idl, Program} from "@coral-xyz/anchor";
+import {AnchorProvider, Idl, Program} from "@coral-xyz/anchor";
 // @ts-ignore
-import { IDL } from "../coral_multisig"
+import {CoralMultisig, IDL} from "../coral_multisig"
 
 const portNumber = 8899;
-async function main() {
 
+async function main() {
 
 
     let stakeConnection: StakeConnection;
     let controller: CustomAbortController;
 
     const pythMintAuthority = new Keypair();
-
-    const alice = loadKeypair("./app/keypairs/alice.json");
-    const bob = loadKeypair("./app/keypairs/bob.json");
     const pythMintAccount = loadKeypair("./app/keypairs/pyth_mint.json");
 
     console.log("Validator at port ", portNumber);
@@ -55,20 +53,6 @@ async function main() {
 
     console.log("Finished set up")
 
-    for (let owner of [alice.publicKey, bob.publicKey]) {
-        await stakeConnection.program.provider.connection.requestAirdrop(
-            owner,
-            1_000_000_000_000
-        );
-        await requestPythAirdrop(
-            owner,
-            pythMintAccount.publicKey,
-            pythMintAuthority,
-            PythBalance.fromString("1000"),
-            stakeConnection.program.provider.connection
-        );
-    }
-
     let multiSig = new Program((IDL as Idl), new PublicKey("86A3SjX2cdavMiAhipoZGbVmKq8Tbari4g3pc9iAqWL"), stakeConnection.provider);
 
     const ownerA = anchor.web3.Keypair.generate();
@@ -78,7 +62,7 @@ async function main() {
     const ownerE = anchor.web3.Keypair.generate();
     const owners = [ownerA.publicKey, ownerB.publicKey, ownerC.publicKey, ownerD.publicKey, ownerE.publicKey];
 
-    const threshold = new anchor.BN(3);
+    const threshold = new anchor.BN(owners.length - 2);
     const multisigSize = 200; // Big enough.
 
     // Create multisigs
@@ -110,78 +94,155 @@ async function main() {
         stakeConnection.program.programId
     );
 
-
-    //Bob
-    const bobMultisigPair = anchor.web3.Keypair.generate();
-
-    const [bobMultisigSigner, bobNonce] =
-        anchor.web3.PublicKey.findProgramAddressSync(
-            [bobMultisigPair.publicKey.toBuffer()],
-            multiSig.programId
+    for (let owner of [aliceMultisigSigner]) {
+        await stakeConnection.program.provider.connection.requestAirdrop(
+            owner,
+            1_000_000_000_000
         );
-    await multiSig.methods.createMultisig(owners, threshold, bobNonce).accounts(
-        {
-            multisig: bobMultisigPair.publicKey,
-        })
-        .preInstructions([await multiSig.account.multisig.createInstruction(
-            bobMultisigPair,
-            multisigSize
-        )])
-        .signers([bobMultisigPair])
-        .rpc();
-
-    console.log("Bob Multisig: ", bobMultisigPair.publicKey.toBase58(), ", Bob Signer: ", bobMultisigSigner.toBase58());
-
-    const bobStakeConnection = await StakeConnection.createStakeConnection(
-        stakeConnection.program.provider.connection,
-        new anchor.Wallet(new Keypair({publicKey: bobMultisigSigner.toBytes(), secretKey: undefined})),
-        stakeConnection.program.programId
-    );
+        await requestPythAirdrop(
+            owner,
+            pythMintAccount.publicKey,
+            pythMintAuthority,
+            PythBalance.fromString("1000"),
+            stakeConnection.program.provider.connection
+        );
+    }
 
     // Alice tokens are fully vested
-    let depositAndLockTx = await aliceStakeConnection.depositAndLockTokens(
+    let {transaction, signers} = await aliceStakeConnection.depositAndLockTokens(
         undefined,
         PythBalance.fromString("500")
     );
-    // depositAndLockTx.transaction.instructions.forEach(ix => console.log(ix))
 
-    // let stakeAccounts = await aliceStakeConnection.getStakeAccounts(alice.publicKey);
-    // let stakeAccount = stakeAccounts.pop();
-    // aliceStakeConnection.getTime().then(time => console.log(stakeAccount.getBalanceSummary(time)))
+    const transactionPubKeys = await createTransaction(transaction, ownerA, multiSig, aliceMultisigPair.publicKey);
+    await approveTransactions(multiSig, aliceMultisigPair, transactionPubKeys.map(tx => tx.transactionKey), ownerB);
+    await approveTransactions(multiSig, aliceMultisigPair, transactionPubKeys.map(tx => tx.transactionKey), ownerC);
+    await executeTransactionsTransactionally(transactionPubKeys, multiSig, aliceMultisigSigner, aliceMultisigPair.publicKey, signers, stakeConnection.provider)
 
-    const vestingSchedule = {
-        periodicVestingAfterListing: {
-            initialBalance: PythBalance.fromString("100").toBN(),
-            startDate: await stakeConnection.getTime(),
-            periodDuration: new BN(3600),
-            numPeriods: new BN(1000),
-        },
-    };
+    console.log("Tokens locked!")
 
-    // Bob has a vesting schedule
+    let stakeAccounts = await aliceStakeConnection.getStakeAccounts(aliceMultisigSigner);
+    let stakeAccount = stakeAccounts.pop();
+    aliceStakeConnection.getTime().then(time => console.log(stakeAccount.getBalanceSummary(time)))
+    let unlockTransactions = await aliceStakeConnection.unlockTokens(stakeAccount, PythBalance.fromString("500"));
 
-    let vestingTx = await bobStakeConnection.setupVestingAccount(
-        PythBalance.fromString("500"),
-        bob.publicKey,
-        vestingSchedule
-    );
-
-    // console.log(vestingTx)
-
-    // await aliceStakeConnection.unlockTokens(stakeAccount, PythBalance.fromString("500"));
     await stakeConnection.program.methods
         .advanceClock(new BN(EPOCH_DURATION).mul(new BN(3)))
         .rpc();
 
-    // stakeAccounts = await aliceStakeConnection.getStakeAccounts(alice.publicKey);
-    // stakeAccount = stakeAccounts.pop();
-    // aliceStakeConnection.getTime().then(time => console.log(stakeAccount.getBalanceSummary(time)))
+    for (const unlockTransaction of unlockTransactions) {
+        let transactionPubKeys = await createTransaction(unlockTransaction, ownerA, multiSig, aliceMultisigPair.publicKey);
+        await approveTransactions(multiSig, aliceMultisigPair, transactionPubKeys.map(tx => tx.transactionKey), ownerB)
+        await approveTransactions(multiSig, aliceMultisigPair, transactionPubKeys.map(tx => tx.transactionKey), ownerC)
+        await executeTransactionsTransactionally(transactionPubKeys, multiSig, aliceMultisigSigner, aliceMultisigPair.publicKey, [], stakeConnection.provider)
+    }
 
-    // let newVar = await aliceStakeConnection.withdrawTokens(stakeAccount, PythBalance.fromNumber(250));
-    // console.log(newVar)
+    console.log("Tokens unlocked")
+
+    await stakeConnection.program.methods
+        .advanceClock(new BN(EPOCH_DURATION).mul(new BN(3)))
+        .rpc();
+
+    stakeAccounts = await aliceStakeConnection.getStakeAccounts(aliceMultisigSigner);
+    stakeAccount = stakeAccounts.pop();
+    aliceStakeConnection.getTime().then(time => console.log(stakeAccount.getBalanceSummary(time)))
+
+    let withdrawTransaction = await aliceStakeConnection.withdrawTokens(stakeAccount, PythBalance.fromString("1"));
+    let transactionPubKeys2 = await createTransaction(withdrawTransaction, ownerA, multiSig, aliceMultisigPair.publicKey);
+
+    await approveTransactions(multiSig, aliceMultisigPair, transactionPubKeys2.map(tx => tx.transactionKey), ownerB)
+    await approveTransactions(multiSig, aliceMultisigPair, transactionPubKeys2.map(tx => tx.transactionKey), ownerC)
+    await executeTransactionsTransactionally(transactionPubKeys2, multiSig, aliceMultisigSigner, aliceMultisigPair.publicKey, [], stakeConnection.provider)
+
+    console.log("Tokens withdrawn")
 
     while (true) {
     }
+}
+
+async function createTransaction(transaction: Transaction, proposer: Keypair, program: Program, multisig: PublicKey) {
+
+    console.log("Creating transaction accounts")
+
+    const transactionPubKeys = [];
+
+
+    for (const ix of transaction.instructions) {
+        let transactionKeyPair = anchor.web3.Keypair.generate();
+        await program.methods.createTransaction(ix.programId, ix.keys, ix.data)
+            .accounts({
+                multisig: multisig,
+                transaction: transactionKeyPair.publicKey,
+                proposer: proposer.publicKey
+            })
+            .preInstructions([await program.account.transaction.createInstruction(
+                transactionKeyPair,
+                1000
+            )])
+            .signers([transactionKeyPair, proposer])
+            .rpc()
+
+        transactionPubKeys.push({
+            transactionKey: transactionKeyPair.publicKey,
+            instructionKeys: ix.keys,
+            programKey: ix.programId
+        });
+    }
+
+    return transactionPubKeys
+}
+
+async function approveTransactions(multiSig: Program, aliceMultisigPair: Keypair, transactionPubKeys, ownerB: Keypair) {
+    console.log("Approving transaction")
+
+    for (const tx of transactionPubKeys) {
+        await multiSig.methods.approve()
+            .accounts(
+                {
+                    multisig: aliceMultisigPair.publicKey,
+                    transaction: tx,
+                    owner: ownerB.publicKey
+                }
+            )
+            .signers([ownerB])
+            .rpc()
+    }
+}
+
+async function executeTransactionsTransactionally(transactionPubKeys: Array<any>, program: Program, signer: PublicKey, multisig: PublicKey, signers: Array<Signer>, provider: AnchorProvider) {
+    console.log("Executing transaction")
+
+    const txIx = new Transaction()
+    for (const tx of transactionPubKeys) {
+        txIx.add(
+            await program.methods.executeTransaction()
+                .accounts(
+                    {
+                        multisig: multisig,
+                        multisigSigner: signer,
+                        transaction: tx.transactionKey
+                    }
+                )
+                .remainingAccounts(
+                    tx.instructionKeys
+                        // Change the signer status on the vendor signer since it's signed by the program, not the client.
+                        .map((meta) =>
+                            meta.pubkey.equals(signer)
+                                ? {...meta, isSigner: false}
+                                : meta
+                        )
+                        .concat({
+                            pubkey: tx.programKey,
+                            isWritable: false,
+                            isSigner: false,
+                        })
+                )
+                .transaction()
+        )
+    }
+
+    await provider.sendAndConfirm(txIx, signers)
+
 }
 
 main();
