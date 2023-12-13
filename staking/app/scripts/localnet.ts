@@ -1,7 +1,12 @@
 import * as anchor from "@coral-xyz/anchor";
 // @ts-ignore
 import BN from "bn.js";
-import {Keypair, PublicKey, Signer, Transaction, TransactionInstruction, VersionedTransaction} from "@solana/web3.js";
+import {
+    Keypair,
+    PublicKey,
+    Signer,
+    Transaction
+} from "@solana/web3.js";
 import {
     readAnchorConfig,
     standardSetup,
@@ -13,7 +18,7 @@ import {
 import {StakeConnection, PythBalance} from "..";
 import {loadKeypair} from "../../tests/utils/keys";
 import {EPOCH_DURATION, StakeAccount} from "../../lib/app";
-import {AnchorProvider, Idl, Program} from "@coral-xyz/anchor";
+import {AnchorProvider, Idl, Program, Provider} from "@coral-xyz/anchor";
 // @ts-ignore
 import {CoralMultisig, IDL} from "../coral_multisig"
 
@@ -61,6 +66,17 @@ async function main() {
     const ownerD = anchor.web3.Keypair.generate();
     const ownerE = anchor.web3.Keypair.generate();
     const owners = [ownerA.publicKey, ownerB.publicKey, ownerC.publicKey, ownerD.publicKey, ownerE.publicKey];
+    const nonceAuthKeypair = Keypair.generate();
+    const nonceKeypair = Keypair.generate();
+
+    stakeConnection.provider.sendAndConfirm(anchor.web3.SystemProgram.createNonceAccount(
+        {
+            fromPubkey: stakeConnection.provider.wallet.publicKey,
+            noncePubkey: nonceKeypair.publicKey,
+            authorizedPubkey: nonceAuthKeypair.publicKey,
+            lamports: 1_000_000_000
+        }
+    ), [nonceKeypair])
 
     const threshold = new anchor.BN(owners.length - 2);
     const multisigSize = 200; // Big enough.
@@ -115,8 +131,8 @@ async function main() {
     );
 
     const transactionPubKeys = await createTransaction(transaction, ownerA, multiSig, aliceMultisigPair.publicKey);
-    await approveTransactions(multiSig, aliceMultisigPair, transactionPubKeys.map(tx => tx.transactionKey), ownerB);
-    await approveTransactions(multiSig, aliceMultisigPair, transactionPubKeys.map(tx => tx.transactionKey), ownerC);
+    await approveTransactions(multiSig, aliceMultisigPair, transactionPubKeys.map(tx => tx.transactionKey), ownerB, stakeConnection.provider, nonceKeypair.publicKey, nonceAuthKeypair);
+    await approveTransactions(multiSig, aliceMultisigPair, transactionPubKeys.map(tx => tx.transactionKey), ownerC, stakeConnection.provider, nonceKeypair.publicKey, nonceAuthKeypair);
     await executeTransactionsTransactionally(transactionPubKeys, multiSig, aliceMultisigSigner, aliceMultisigPair.publicKey, signers, stakeConnection.provider)
 
     console.log("Tokens locked!")
@@ -132,8 +148,8 @@ async function main() {
 
     for (const unlockTransaction of unlockTransactions) {
         let transactionPubKeys = await createTransaction(unlockTransaction, ownerA, multiSig, aliceMultisigPair.publicKey);
-        await approveTransactions(multiSig, aliceMultisigPair, transactionPubKeys.map(tx => tx.transactionKey), ownerB)
-        await approveTransactions(multiSig, aliceMultisigPair, transactionPubKeys.map(tx => tx.transactionKey), ownerC)
+        await approveTransactions(multiSig, aliceMultisigPair, transactionPubKeys.map(tx => tx.transactionKey), ownerB, stakeConnection.provider, nonceKeypair.publicKey, nonceAuthKeypair)
+        await approveTransactions(multiSig, aliceMultisigPair, transactionPubKeys.map(tx => tx.transactionKey), ownerC, stakeConnection.provider, nonceKeypair.publicKey, nonceAuthKeypair)
         await executeTransactionsTransactionally(transactionPubKeys, multiSig, aliceMultisigSigner, aliceMultisigPair.publicKey, [], stakeConnection.provider)
     }
 
@@ -150,8 +166,8 @@ async function main() {
     let withdrawTransaction = await aliceStakeConnection.withdrawTokens(stakeAccount, PythBalance.fromString("1"));
     let transactionPubKeys2 = await createTransaction(withdrawTransaction, ownerA, multiSig, aliceMultisigPair.publicKey);
 
-    await approveTransactions(multiSig, aliceMultisigPair, transactionPubKeys2.map(tx => tx.transactionKey), ownerB)
-    await approveTransactions(multiSig, aliceMultisigPair, transactionPubKeys2.map(tx => tx.transactionKey), ownerC)
+    await approveTransactions(multiSig, aliceMultisigPair, transactionPubKeys2.map(tx => tx.transactionKey), ownerB, stakeConnection.provider, nonceKeypair.publicKey, nonceAuthKeypair)
+    await approveTransactions(multiSig, aliceMultisigPair, transactionPubKeys2.map(tx => tx.transactionKey), ownerC, stakeConnection.provider, nonceKeypair.publicKey, nonceAuthKeypair)
     await executeTransactionsTransactionally(transactionPubKeys2, multiSig, aliceMultisigSigner, aliceMultisigPair.publicKey, [], stakeConnection.provider)
 
     console.log("Tokens withdrawn")
@@ -192,11 +208,26 @@ async function createTransaction(transaction: Transaction, proposer: Keypair, pr
     return transactionPubKeys
 }
 
-async function approveTransactions(multiSig: Program, aliceMultisigPair: Keypair, transactionPubKeys, ownerB: Keypair) {
+async function approveTransactions(multiSig: Program, aliceMultisigPair: Keypair, transactionPubKeys, ownerB: Keypair, provider: Provider, nonceAccount: PublicKey, nonceAuth: Keypair) {
     console.log("Approving transaction")
 
     for (const tx of transactionPubKeys) {
-        await multiSig.methods.approve()
+
+        let nonce = await provider.connection.getNonceAndContext(nonceAccount);
+        let nonceAdvance = anchor.web3.SystemProgram.nonceAdvance({
+            noncePubkey: nonceAccount,
+            authorizedPubkey: nonceAuth.publicKey
+        });
+        let temp = new Transaction(
+            {
+                nonceInfo: {
+                    nonce: nonce.value.nonce, nonceInstruction: nonceAdvance
+                },
+                minContextSlot: nonce.context.slot
+            }
+        )
+
+        temp.add(await multiSig.methods.approve()
             .accounts(
                 {
                     multisig: aliceMultisigPair.publicKey,
@@ -205,7 +236,10 @@ async function approveTransactions(multiSig: Program, aliceMultisigPair: Keypair
                 }
             )
             .signers([ownerB])
-            .rpc()
+            .transaction()
+        );
+
+        await provider.sendAndConfirm(temp, [ownerB, nonceAuth])
     }
 }
 
